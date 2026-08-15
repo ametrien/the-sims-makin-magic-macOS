@@ -6980,11 +6980,21 @@ HRESULT ddraw_surface_create(struct ddraw *ddraw, const DDSURFACEDESC2 *surface_
                 int screen_w = GetSystemMetrics(SM_CXSCREEN);
                 int screen_h = GetSystemMetrics(SM_CYSCREEN);
 
+                LONG style = GetWindowLongW(window, GWL_STYLE);
+                RECT r = {0, 0, mode.width, mode.height};
+
+                /* Попытка дать окну заголовок, чтобы его можно было двигать
+                 * и сворачивать средствами macOS. */
+                style |= WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+                style &= ~WS_POPUP;
+                SetWindowLongW(window, GWL_STYLE, style);
+                AdjustWindowRect(&r, style, FALSE);
+
                 SetWindowPos(window, NULL,
-                        (screen_w - (int)mode.width) / 2,
-                        (screen_h - (int)mode.height) / 2,
-                        mode.width, mode.height,
-                        SWP_NOZORDER | SWP_NOACTIVATE);
+                        (screen_w - (r.right - r.left)) / 2,
+                        (screen_h - (r.bottom - r.top)) / 2,
+                        r.right - r.left, r.bottom - r.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             }
         }
     }

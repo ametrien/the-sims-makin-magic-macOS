@@ -99,24 +99,13 @@ WINE_D3D_CONFIG="renderer=gl" wine Sims.exe
 `renderer=gl` is **required**. On the Vulkan backend MoltenVK cannot present a 16-bit
 format and the game will not start.
 
-### Optional: make the window movable
-
-The game believes it is running fullscreen, so its window has no frame and macOS will not
-let you drag it:
-
-```bash
-wine reg add 'HKCU\Software\Wine\AppDefaults\Sims.exe\Mac Driver' \
-    /v AllowImmovableWindows /t REG_SZ /d N /f
-defaults write -g NSWindowShouldDragOnGesture -bool true
-```
-
-The second command is a global macOS setting. After it, **Ctrl + Cmd + drag** moves the
-window from anywhere. Modifiers are used deliberately: plain dragging is how you build
-walls in the game.
-
 ## Known issues
 
-- The window cannot be minimised with `Cmd+M` (no title bar). `Cmd+H` and `Cmd+Tab` work.
+- **The window cannot be moved or minimised.** The game believes it is fullscreen, so its
+  window has no frame. `Cmd+H` and `Cmd+Tab` work; `Cmd+M` does not. Three approaches were
+  tried and all of them break the game — see the notes below.
+- Wine's `AllowImmovableWindows=N` (Mac driver) does make the window movable at the Cocoa
+  level, but the game then crashes a few seconds after launch. Do not set it.
 - Changing the window style from code kills the game — tried both during device reset and
   from a delayed thread. See `experiment/window-caption`.
 - Wine's virtual desktop is incompatible with the mode emulation: inside it Wine handles

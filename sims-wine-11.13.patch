@@ -1,0 +1,452 @@
+--- a/dlls/ddraw/surface.c
++++ b/dlls/ddraw/surface.c
+@@ -2139,6 +2139,12 @@
+ 
+     TRACE("iface %p, attachment %p.\n", iface, attachment);
+ 
++    if (!attachment_impl)
++    {
++        WARN("Attachment is NULL.\n");
++        return DDERR_INVALIDPARAMS;
++    }
++
+     /* Version 7 of this interface seems to refuse everything except z buffers, as per msdn */
+     if(!(attachment_impl->surface_desc.ddsCaps.dwCaps & DDSCAPS_ZBUFFER))
+     {
+@@ -2166,6 +2172,12 @@
+ 
+     TRACE("iface %p, attachment %p.\n", iface, attachment);
+ 
++    if (!attachment_impl)
++    {
++        WARN("Attachment is NULL.\n");
++        return DDERR_INVALIDPARAMS;
++    }
++
+     /* Tests suggest that
+      * -> offscreen plain surfaces can be attached to other offscreen plain surfaces
+      * -> offscreen plain surfaces can be attached to primaries
+@@ -3780,8 +3792,10 @@
+ 
+     if (surface_desc->dwSize != sizeof(DDSURFACEDESC))
+     {
+-        WARN("Incorrect structure size %lu.\n", surface_desc->dwSize);
+-        return DDERR_INVALIDPARAMS;
++        /* The Sims passes an uninitialised dwSize here and relies on the
++         * description being filled in anyway to learn the desktop format. */
++        WARN("Incorrect structure size %lu, filling in anyway.\n", surface_desc->dwSize);
++        surface_desc->dwSize = sizeof(DDSURFACEDESC);
+     }
+ 
+     wined3d_mutex_lock();
+@@ -6378,8 +6392,13 @@
+     wined3d_desc->bind_flags |= WINED3D_BIND_SHADER_RESOURCE;
+     if (caps & DDSCAPS_ZBUFFER)
+         wined3d_desc->bind_flags |= WINED3D_BIND_DEPTH_STENCIL;
+-    else if (is_render_target(ddraw, caps, version))
++    else if (is_render_target(ddraw, caps, version)
++            && wined3d_desc->format != WINED3DFMT_P8_UINT)
++    {
++        /* Paletted formats can never be render targets; requesting it makes
++         * texture creation fail outright on backends without P8 support. */
+         wined3d_desc->bind_flags |= WINED3D_BIND_RENDER_TARGET;
++    }
+ 
+     if ((caps & DDSCAPS_SYSTEMMEMORY) && !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)))
+     {
+@@ -6877,8 +6896,17 @@
+         return DDERR_INVALIDCAPS;
+     }
+ 
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (SUCCEEDED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL))
++            && ddraw->emulated_format)
+     {
++        /* Report the emulated mode, so the primary surface is created in the
++         * format the application asked for. */
++        mode.format_id = ddraw->emulated_format;
++        mode.width = ddraw->emulated_width;
++        mode.height = ddraw->emulated_height;
++    }
++    if (FAILED(hr))
++    {
+         ERR("Failed to get display mode, hr %#lx.\n", hr);
+         free(texture);
+         return hr_ddraw_from_wined3d(hr);
+@@ -6931,6 +6959,10 @@
+             swapchain_desc.backbuffer_width = mode.width;
+             swapchain_desc.backbuffer_height = mode.height;
+             swapchain_desc.backbuffer_format = mode.format_id;
++            /* The mode is emulated, so the host mode must stay as it is; a
++             * fullscreen swapchain would try to change it and fail. */
++            if (ddraw->emulated_format)
++                swapchain_desc.windowed = TRUE;
+ 
+             if (FAILED(hr = wined3d_device_reset(ddraw->wined3d_device,
+                     &swapchain_desc, NULL, ddraw_reset_enum_callback, FALSE)))
+@@ -6939,6 +6971,21 @@
+                 free(texture);
+                 return hr_ddraw_from_wined3d(hr);
+             }
++
++            /* With an emulated mode the window keeps its fullscreen size, so
++             * the picture ends up in the top left corner. Centre it. */
++            if (ddraw->emulated_format && swapchain_desc.device_window)
++            {
++                HWND window = swapchain_desc.device_window;
++                int screen_w = GetSystemMetrics(SM_CXSCREEN);
++                int screen_h = GetSystemMetrics(SM_CYSCREEN);
++
++                SetWindowPos(window, NULL,
++                        (screen_w - (int)mode.width) / 2,
++                        (screen_h - (int)mode.height) / 2,
++                        mode.width, mode.height,
++                        SWP_NOZORDER | SWP_NOACTIVATE);
++            }
+         }
+     }
+ 
+--- a/dlls/ddraw/ddraw.c
++++ b/dlls/ddraw/ddraw.c
+@@ -128,6 +128,19 @@
+ static inline struct ddraw *impl_from_IDirect3D7(IDirect3D7 *iface)
+ {
+     return CONTAINING_RECORD(iface, struct ddraw, IDirect3D7_iface);
++}
++
++static HRESULT ddraw_get_display_mode(struct ddraw *ddraw, struct wined3d_display_mode *mode)
++{
++    HRESULT hr = wined3d_output_get_display_mode(ddraw->wined3d_output, mode, NULL);
++
++    if (SUCCEEDED(hr) && ddraw->emulated_format)
++    {
++        mode->format_id = ddraw->emulated_format;
++        mode->width = ddraw->emulated_width;
++        mode->height = ddraw->emulated_height;
++    }
++    return hr;
+ }
+ 
+ static HRESULT WINAPI ddraw7_QueryInterface(IDirectDraw7 *iface, REFIID riid, void **out)
+@@ -568,7 +581,7 @@
+ 
+     TRACE("ddraw %p.\n", ddraw);
+ 
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+     {
+         ERR("Failed to get display mode.\n");
+         return hr;
+@@ -705,7 +718,7 @@
+     {
+         ddraw->flags &= ~DDRAW_RESTORE_MODE;
+         if (ddraw->cooperative_level & DDSCL_EXCLUSIVE &&
+-                SUCCEEDED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++                SUCCEEDED(hr = ddraw_get_display_mode(ddraw, &mode)))
+         {
+             SetRect(&clip_rect, 0, 0, mode.width, mode.height);
+             ClipCursor(&clip_rect);
+@@ -1136,7 +1149,22 @@
+ 
+     /* TODO: The possible return values from msdn suggest that the screen mode
+      * can't be changed if a surface is locked or some drawing is in progress. */
+-    if (SUCCEEDED(hr = wined3d_output_set_display_mode(ddraw->wined3d_output, &mode)))
++    hr = wined3d_output_set_display_mode(ddraw->wined3d_output, &mode);
++    if (FAILED(hr) && format != WINED3DFMT_UNKNOWN)
++    {
++        /* Hosts such as macOS have no 16 bit display modes at all, but old
++         * games render exclusively in 16 bit and give up when the mode is
++         * refused. Keep the host mode and hand the application a primary
++         * surface in the requested format instead; the contents are converted
++         * when they are presented. */
++        WARN("Failed to set display mode, emulating %lux%lu %lu bpp.\n", width, height, bpp);
++        ddraw->emulated_format = format;
++        ddraw->emulated_width = width;
++        ddraw->emulated_height = height;
++        hr = WINED3D_OK;
++    }
++
++    if (SUCCEEDED(hr))
+     {
+         if (ddraw->primary)
+         {
+@@ -1495,7 +1523,7 @@
+         {WINED3DFMT_D32_UNORM, DDBD_32},
+     };
+ 
+-    wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL);
++    ddraw_get_display_mode(ddraw, &mode);
+     for (unsigned int i = 0; i < ARRAY_SIZE(formats); ++i)
+     {
+         if (SUCCEEDED(wined3d_check_device_format(ddraw->wined3d, ddraw->wined3d_adapter, WINED3D_DEVICE_TYPE_HAL,
+@@ -1708,7 +1736,7 @@
+ 
+     wined3d_mutex_lock();
+ 
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+     {
+         ERR("Failed to get display mode, hr %#lx.\n", hr);
+         wined3d_mutex_unlock();
+@@ -1801,7 +1829,7 @@
+ 
+     TRACE("iface %p, codes_count %p, codes %p.\n", iface, NumCodes, Codes);
+ 
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+     {
+         ERR("Failed to get display mode, hr %#lx.\n", hr);
+         return hr;
+@@ -1863,7 +1891,7 @@
+     TRACE("iface %p, frequency %p.\n", iface, frequency);
+ 
+     wined3d_mutex_lock();
+-    hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL);
++    hr = ddraw_get_display_mode(ddraw, &mode);
+     wined3d_mutex_unlock();
+     if (FAILED(hr))
+     {
+@@ -1998,7 +2026,7 @@
+     /* Some applications (e.g. 3DMark 2000) assume that the reported amount of
+      * video memory doesn't include the memory used by the default framebuffer.
+      */
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+     {
+         WARN("Failed to get display mode, hr %#lx.\n", hr);
+         wined3d_mutex_unlock();
+@@ -3364,7 +3392,7 @@
+             };
+             struct wined3d_display_mode mode;
+ 
+-            if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++            if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+             {
+                 ERR("Failed to get display mode, hr %#lx.\n", hr);
+                 wined3d_mutex_unlock();
+@@ -4622,7 +4650,7 @@
+      * not like that we'll have to find some workaround, like iterating over
+      * all imaginable formats and collecting all the depth stencil formats we
+      * can get. */
+-    if (FAILED(hr = wined3d_output_get_display_mode(ddraw->wined3d_output, &mode, NULL)))
++    if (FAILED(hr = ddraw_get_display_mode(ddraw, &mode)))
+     {
+         ERR("Failed to get display mode, hr %#lx.\n", hr);
+         wined3d_mutex_unlock();
+--- a/dlls/ddraw/ddraw_private.h
++++ b/dlls/ddraw/ddraw_private.h
+@@ -79,6 +79,9 @@
+ 
+ struct ddraw
+ {
++    /* Emulated display mode for hosts that lack the requested one. */
++    enum wined3d_format_id emulated_format;
++    unsigned int emulated_width, emulated_height;
+     /* Interfaces */
+     IDirectDraw7 IDirectDraw7_iface;
+     IDirectDraw4 IDirectDraw4_iface;
+--- a/dlls/wined3d/swapchain.c
++++ b/dlls/wined3d/swapchain.c
+@@ -1290,18 +1290,88 @@
+ 
+     wined3d_swapchain_vk_rotate(swapchain, context_vk);
+ 
+-    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+-    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
++    /* The Vulkan backend has no drawable; the front buffer content lives in
++     * its texture. Claiming DRAWABLE here leaves the resource without any
++     * valid location, breaking ddraw primary surface blits. */
++    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_TEXTURE_RGB);
++    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_TEXTURE_RGB);
+ 
+     TRACE("Starting new frame.\n");
+ 
+     context_release(&context_vk->c);
++}
++
++/* The Vulkan backend has no drawable, so the ddraw primary surface never
++ * reaches the screen through the usual path. Copy it to the window DC. */
++static void swapchain_vk_frontbuffer_updated(struct wined3d_swapchain *swapchain)
++{
++    struct wined3d_texture *front_buffer = swapchain->front_buffer;
++    D3DKMT_DESTROYDCFROMMEMORY destroy_desc;
++    D3DKMT_CREATEDCFROMMEMORY create_desc;
++    unsigned int row_pitch, slice_pitch;
++    const struct wined3d_format *format;
++    struct wined3d_context *context;
++    POINT offset = {0, 0};
++    RECT draw_rect;
++    NTSTATUS status;
++    HDC src_dc;
++
++    TRACE("swapchain %p.\n", swapchain);
++
++    format = front_buffer->resource.format;
++    if (!format->ddi_format)
++    {
++        WARN("Cannot create a DC for format %s.\n", debug_d3dformat(format->id));
++        return;
++    }
++
++    context = context_acquire(swapchain->device, front_buffer, 0);
++    wined3d_texture_load_location(front_buffer, 0, context, WINED3D_LOCATION_SYSMEM);
++    wined3d_texture_get_pitch(front_buffer, 0, &row_pitch, &slice_pitch);
++
++    create_desc.pMemory = front_buffer->resource.heap_memory;
++    create_desc.Format = format->ddi_format;
++    create_desc.Width = wined3d_texture_get_level_width(front_buffer, 0);
++    create_desc.Height = wined3d_texture_get_level_height(front_buffer, 0);
++    create_desc.Pitch = row_pitch;
++    create_desc.hDeviceDc = CreateCompatibleDC(NULL);
++    create_desc.pColorTable = NULL;
++
++    status = D3DKMTCreateDCFromMemory(&create_desc);
++    DeleteDC(create_desc.hDeviceDc);
++    if (status)
++    {
++        WARN("Failed to create DC, status %#lx.\n", status);
++        context_release(context);
++        return;
++    }
++    src_dc = create_desc.hDc;
++
++    if (swapchain->state.desc.windowed)
++        ClientToScreen(swapchain->win_handle, &offset);
++
++    SetRect(&draw_rect, 0, 0, front_buffer->resource.width, front_buffer->resource.height);
++    if (!IsRectEmpty(&swapchain->front_buffer_update))
++        IntersectRect(&draw_rect, &draw_rect, &swapchain->front_buffer_update);
++
++    if (!BitBlt(swapchain->dc, draw_rect.left - offset.x, draw_rect.top - offset.y,
++            draw_rect.right - draw_rect.left, draw_rect.bottom - draw_rect.top,
++            src_dc, draw_rect.left, draw_rect.top, SRCCOPY))
++        ERR("Failed to blit the front buffer.\n");
++
++    destroy_desc.hDc = src_dc;
++    destroy_desc.hBitmap = create_desc.hBitmap;
++    if ((status = D3DKMTDestroyDCFromMemory(&destroy_desc)))
++        ERR("Failed to destroy src dc, status %#lx.\n", status);
++
++    SetRectEmpty(&swapchain->front_buffer_update);
++    context_release(context);
+ }
+ 
+ static const struct wined3d_swapchain_ops swapchain_vk_ops =
+ {
+     swapchain_vk_present,
+-    swapchain_frontbuffer_updated,
++    swapchain_vk_frontbuffer_updated,
+ };
+ 
+ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchain)
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -1310,6 +1310,44 @@
+         else
+         {
+             wined3d_mode->scanline_ordering = WINED3D_SCANLINE_ORDERING_UNKNOWN;
++        }
++    }
++
++    /* macOS only reports the panel's own scaled resolutions. Old games ask for
++     * the classic VGA modes and give up if they are missing. */
++    {
++        static const struct { unsigned int w, h; } legacy_modes[] =
++        {
++            {640, 480}, {800, 600}, {1024, 768},
++        };
++        unsigned int j, k;
++
++        for (j = 0; j < ARRAY_SIZE(legacy_modes); ++j)
++        {
++            bool present = false;
++
++            for (k = 0; k < output->mode_count; ++k)
++            {
++                if (output->modes[k].width == legacy_modes[j].w
++                        && output->modes[k].height == legacy_modes[j].h)
++                {
++                    present = true;
++                    break;
++                }
++            }
++            if (present)
++                continue;
++
++            if (!wined3d_array_reserve((void **)&output->modes, &output->modes_size,
++                    output->mode_count + 1, sizeof(*output->modes)))
++                break;
++
++            wined3d_mode = &output->modes[output->mode_count++];
++            wined3d_mode->width = legacy_modes[j].w;
++            wined3d_mode->height = legacy_modes[j].h;
++            wined3d_mode->format_id = pixelformat_for_depth(32);
++            wined3d_mode->refresh_rate = DEFAULT_REFRESH_RATE;
++            wined3d_mode->scanline_ordering = WINED3D_SCANLINE_ORDERING_PROGRESSIVE;
+         }
+     }
+ 
+@@ -1335,7 +1373,11 @@
+         const struct wined3d_format *mode_format = wined3d_get_format(adapter,
+                 mode->format_id, WINED3D_BIND_RENDER_TARGET);
+ 
+-        if (format->byte_count != mode_format->byte_count)
++        /* macOS has no 16 bit display modes, but games like The Sims refuse to
++         * run without one. Advertise the available modes as 16 bit as well;
++         * the caller substitutes the requested format anyway. */
++        if (format->byte_count != mode_format->byte_count
++                && format->id != WINED3DFMT_B5G6R5_UNORM)
+             return false;
+     }
+ 
+--- a/dlls/wined3d/resource.c
++++ b/dlls/wined3d/resource.c
+@@ -441,7 +441,7 @@
+ {
+     const struct wined3d_d3d_info *d3d_info = &resource->device->adapter->d3d_info;
+ 
+-    if (!wined3d_resource_is_offscreen(resource))
++    if (!wined3d_resource_is_offscreen(resource) && !d3d_info->no_drawable)
+     {
+         resource->draw_binding = WINED3D_LOCATION_DRAWABLE;
+     }
+--- a/dlls/wined3d/texture_vk.c
++++ b/dlls/wined3d/texture_vk.c
+@@ -942,6 +942,7 @@
+             return texture->sub_resources[sub_resource_idx].user_memory ? TRUE
+                     : wined3d_resource_prepare_sysmem(&texture->resource);
+ 
++        case WINED3D_LOCATION_DRAWABLE:
+         case WINED3D_LOCATION_TEXTURE_RGB:
+             return wined3d_texture_vk_prepare_texture(wined3d_texture_vk(texture), wined3d_context_vk(context));
+ 
+@@ -963,6 +964,7 @@
+ 
+     switch (location)
+     {
++        case WINED3D_LOCATION_DRAWABLE:
+         case WINED3D_LOCATION_TEXTURE_RGB:
+             return wined3d_texture_vk_load_texture(wined3d_texture_vk(texture), sub_resource_idx, context);
+ 
+--- a/dlls/wined3d/adapter_vk.c
++++ b/dlls/wined3d/adapter_vk.c
+@@ -2289,6 +2289,9 @@
+ {
+     const struct VkPhysicalDeviceExtendedDynamicState3FeaturesEXT *dynamic_state3;
+     struct wined3d_d3d_info *d3d_info = &adapter_vk->a.d3d_info;
++
++    /* There is no drawable in the Vulkan backend. */
++    d3d_info->no_drawable = 1;
+     struct wined3d_vk_info *vk_info = &adapter_vk->vk_info;
+     struct wined3d_physical_device_info device_info;
+     struct wined3d_vertex_caps vertex_caps;
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -222,6 +222,7 @@
+     struct wined3d_d3d_limits limits;
+     uint32_t wined3d_creation_flags;
+     uint32_t emulated_flatshading : 1;
++    uint32_t no_drawable : 1;
+     uint32_t ffp_alpha_test : 1;
+     uint32_t shader_double_precision : 1;
+     uint32_t shader_output_interpolation : 1;

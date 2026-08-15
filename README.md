@@ -1,73 +1,165 @@
-# Патчи Wine для The Sims 1: Makin' Magic на Apple Silicon
+# The Sims 1 on Apple Silicon
 
-Набор правок к **Wine 11.13**, после которых The Sims 1 (Makin' Magic) запускается
-и играется на macOS / Apple Silicon (проверено на M3 Pro, macOS 26, Wine Staging 11.13).
+Wine patches that make **The Sims (2000) and its expansions** run on Apple Silicon Macs.
 
-## Причина, по которой игра не запускалась
+You bring your own copy of the game. This repository only contains patches to Wine and
+the tooling to apply them.
 
-The Sims 1 умеет рисовать **только в 16-битном цвете**. В исполняемом файле сохранились
-RTTI-имена классов, и среди отрисовщиков есть только шестнадцатибитные —
-`cStandardBlitter16`, `cStandardZBlitter16`, `cLineRender16`. Классов на 24 или 32 бита
-нет ни одного.
+*[Русская версия](README.ru.md)*
 
-В macOS 16-битных режимов экрана не существует. Игра не находила подходящего режима,
-оставалась в 32 битах, не могла создать отрисовщик ландшафта и падала в `cTerrain`
-с обращением по нулевому указателю.
+---
 
-## Что делают правки
+## Why the game does not run
 
-| Файл | Правка |
+The Sims 1 renders **only in 16-bit colour**. Its executable contains exactly three
+rasteriser classes, and all of them are 16-bit:
+
+```
+cStandardBlitter16
+cStandardZBlitter16
+cLineRender16
+```
+
+There is no 24-bit or 32-bit renderer anywhere in the binary.
+
+macOS has no 16-bit display modes at all — and never had. So the game asks Wine for a
+list of display modes, finds nothing it can use, stays in 32-bit, fails to create its
+terrain renderer, and crashes on a null pointer somewhere inside `cTerrain`.
+
+Every symptom people report comes from this one cause:
+
+| Symptom | What is actually happening |
 |---|---|
-| `dlls/ddraw/surface.c` | `GetSurfaceDesc` заполняет описание даже при некорректном `dwSize` — игра узнаёт формат экрана (`dwSize` здесь выходной параметр) |
-| `dlls/wined3d/directx.c` | `mode_matches_filter` пропускает `B5G6R5`; в список режимов дописаны 640×480 / 800×600 / 1024×768 |
-| `dlls/ddraw/ddraw.c`, `ddraw_private.h` | эмуляция режима в `SetDisplayMode`: системный режим не трогаем, приложению отдаём запрошенный формат (`emulated_format/width/height`, помощник `ddraw_get_display_mode`) |
-| `dlls/ddraw/surface.c` | первичная поверхность создаётся в эмулируемом формате; при эмуляции цепочка показа оконная, окно центрируется |
+| Splash screen is pink and half the width | 16-bit pixels written into a 32-bit buffer |
+| Black screen, music plays | rendering never starts, the game dies during setup |
+| Crash a few seconds after launch | null renderer, because no 16-bit mode was available |
 
-Дополнительно исправлены два самостоятельных бага Wine, не связанных с Sims:
+This is not specific to any particular release or repack of the game. It affects the
+whole generation of 16-bit-only titles on macOS.
 
-- `dlls/ddraw/surface.c` — `ddraw_surface4/7_AddAttachedSurface` разыменовывали NULL,
-  если приложение передавало пустой указатель. Теперь возвращается `DDERR_INVALIDPARAMS`.
-- `dlls/wined3d/swapchain.c`, `resource.c`, `texture_vk.c`, `adapter_vk.c`,
-  `wined3d_private.h` — вулкановый бэкенд помечал первичный буфер локацией
-  `WINED3D_LOCATION_DRAWABLE`, которой в нём не существует, и инвалидировал все
-  остальные; буфер оставался без единой годной локации. Добавлен признак
-  `no_drawable` и написана вулканова реализация вывода первичного буфера в окно.
+## What the patches do
 
-## Установка
+1. **Report 16-bit display modes.** macOS offers none, so Wine advertises the existing
+   modes as 16-bit too.
+2. **Add the classic resolutions.** macOS only reports its own panel-shaped resolutions
+   (1024×640, 1280×800…). Old games ask for 640×480, 800×600, 1024×768 and give up if
+   they are missing.
+3. **Emulate the mode switch.** When the host refuses to change to 800×600×16, keep the
+   host mode and hand the game a 16-bit primary surface instead. The contents are
+   converted when presented.
+4. **Fill in the surface description.** The game asks for the desktop pixel format with
+   an uninitialised `dwSize`; Wine rejected the call and returned nothing, so the game
+   never learned the screen format.
+
+Two unrelated Wine bugs were found and fixed along the way:
+
+- `ddraw_surface4/7_AddAttachedSurface` dereferenced a NULL attachment instead of
+  returning `DDERR_INVALIDPARAMS`.
+- The Vulkan backend marked the swapchain front buffer as living in
+  `WINED3D_LOCATION_DRAWABLE` — a location that does not exist in that backend — and
+  invalidated every other location, leaving the buffer with no valid content anywhere.
+
+## Requirements
+
+- Apple Silicon Mac (tested on M3 Pro, macOS 26)
+- [Wine Staging 11.13](https://github.com/Gcenx/macOS_Wine_builds/releases) for macOS
+- Your own copy of The Sims 1
+
+The patches are built against Wine 11.13 specifically. `wined3d` and `ddraw` are internal
+Wine modules with no stable interface between versions, so the built libraries will not
+work with a different Wine build — rebuild them against whatever version you use.
+
+## Install
+
+### Build and install the patched libraries
 
 ```bash
-~/sims-wine-patches/install.command
+./build.sh
 ```
 
-Кладёт готовые библиотеки в `/Applications/Wine Staging.app/.../lib/wine/i386-windows/`,
-сохраняя оригиналы рядом как `*.orig`. Обновление Wine патчи затрёт — запустить заново.
+Downloads the Wine 11.13 sources, applies the patch, builds the two modules and installs
+them, keeping the originals as `*.orig`. Takes a few minutes: only `ddraw.dll` and
+`wined3d.dll` are built, not the whole of Wine.
 
-## Сборка из исходников
-
-Пересобирать весь Wine не нужно, достаточно двух PE-модулей:
+Needs Xcode Command Line Tools plus `mingw-w64` and `bison` from Homebrew:
 
 ```bash
-export PATH="/opt/homebrew/opt/bison/bin:$PATH"   # системный bison слишком старый
-tar -xf wine-11.13.tar.xz
-patch -p1 -d wine-11.13 < sims-wine-11.13.patch
-mkdir build && cd build
-../wine-11.13/configure --enable-archs=i386 --without-x --without-freetype --disable-tests
-make -j8 dlls/ddraw/i386-windows/ddraw.dll
-make -j8 dlls/wined3d/i386-windows/wined3d.dll
+brew install mingw-w64 bison
 ```
 
-Требуется mingw-w64. Модули ставятся в каталог установки Wine, а **не** в `syswow64`
-префикса — оттуда загрузчик их не подхватывает.
+### Install the game
 
-## Запуск
+Run your own installer under Wine, then launch with:
 
-Обязательно **`WINE_D3D_CONFIG="renderer=gl"`**: на Vulkan упирается в MoltenVK, который
-не умеет показывать 16-битный формат в цепочке показа. Готовый скрипт — `~/sims-magic.command`.
+```bash
+cd "$HOME/.wine/drive_c/Program Files (x86)/SIMS_MAG"
+WINE_D3D_CONFIG="renderer=gl" wine Sims.exe
+```
 
-## Известное
+`renderer=gl` is **required**. On the Vulkan backend MoltenVK cannot present a 16-bit
+format and the game will not start.
 
-- Буква «я» не отображается в игре. Это баг русификации репака, а не Wine: в CP1251
-  «я» имеет код `0xFF`, последний в таблице, и теряется в шрифте перевода.
-- Правки заточены под этот случай и в апстрим в таком виде не годятся: эмуляция режима
-  включается всегда, когда системный режим установить не удалось. Годятся к отправке
-  как есть только две — NULL-проверка в `AddAttachedSurface` и `DRAWABLE` в вулкановом бэкенде.
+### Optional: make the window movable
+
+The game believes it is running fullscreen, so its window has no frame and macOS will not
+let you drag it:
+
+```bash
+wine reg add 'HKCU\Software\Wine\AppDefaults\Sims.exe\Mac Driver' \
+    /v AllowImmovableWindows /t REG_SZ /d N /f
+defaults write -g NSWindowShouldDragOnGesture -bool true
+```
+
+The second command is a global macOS setting. After it, **Ctrl + Cmd + drag** moves the
+window from anywhere. Modifiers are used deliberately: plain dragging is how you build
+walls in the game.
+
+## Known issues
+
+- The window cannot be minimised with `Cmd+M` (no title bar). `Cmd+H` and `Cmd+Tab` work.
+- Changing the window style from code kills the game — tried both during device reset and
+  from a delayed thread. See `experiment/window-caption`.
+- Wine's virtual desktop is incompatible with the mode emulation: inside it Wine handles
+  the mode change itself and reports success, so the emulation never kicks in. See
+  `experiment/virtual-desktop`.
+- Updating Wine overwrites the patched libraries. Re-run `install.command`.
+
+## Repository layout
+
+```
+src/          patched Wine sources
+dlls/         prebuilt libraries (Wine 11.13 only)
+build.sh      build and install from sources
+install.command  reinstall prebuilt libraries
+sims-wine-11.13.patch   the patch itself
+```
+
+Branches `experiment/*` hold approaches that did not work, each with notes on why —
+useful if you plan to pick this up.
+
+## Upstream
+
+Two of the fixes are genuine Wine bugs, unrelated to any game, and are suitable for
+WineHQ as they are. The 16-bit mode emulation is not: it currently triggers whenever a
+mode change fails, and would need an explicit opt-in before it could be proposed.
+
+See [DISTRIBUTION.md](DISTRIBUTION.md).
+
+## Licence
+
+The patches follow Wine's licence (LGPL 2.1+). No game content is included or
+distributed here.
+
+## Building the self-contained app
+
+```bash
+./build.sh          # patched libraries
+./make-bundle.sh    # assembles dist/Sims on Mac.app
+```
+
+The bundle carries its own copy of Wine with the patches already applied, so it does not
+depend on what the user has installed and does not break when Wine updates. On first
+launch it creates its own prefix and asks for the folder containing your installer or an
+existing installation.
+
+Roughly 1.5 GB. Sign it before handing it to anyone, otherwise Gatekeeper blocks it.

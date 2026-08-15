@@ -6972,20 +6972,6 @@ HRESULT ddraw_surface_create(struct ddraw *ddraw, const DDSURFACEDESC2 *surface_
                 return hr_ddraw_from_wined3d(hr);
             }
 
-            /* With an emulated mode the window keeps its fullscreen size, so
-             * the picture ends up in the top left corner. Centre it. */
-            if (ddraw->emulated_format && swapchain_desc.device_window)
-            {
-                HWND window = swapchain_desc.device_window;
-                int screen_w = GetSystemMetrics(SM_CXSCREEN);
-                int screen_h = GetSystemMetrics(SM_CYSCREEN);
-
-                SetWindowPos(window, NULL,
-                        (screen_w - (int)mode.width) / 2,
-                        (screen_h - (int)mode.height) / 2,
-                        mode.width, mode.height,
-                        SWP_NOZORDER | SWP_NOACTIVATE);
-            }
         }
     }
 

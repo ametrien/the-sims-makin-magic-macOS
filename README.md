@@ -9,6 +9,33 @@ the tooling to apply them.
 
 ---
 
+## Quick start
+
+The easiest way to play is the self-contained app. It carries its own patched Wine, so
+updating Wine Staging can never break it.
+
+```bash
+brew install mingw-w64 bison     # once
+./build.sh                       # build the patched ddraw.dll and wined3d.dll
+./make-bundle.sh                 # creates dist/Sims on Mac.app
+open "dist/Sims on Mac.app"
+```
+
+On first launch the app sets up Wine and asks for a folder:
+
+- **your installer discs** (the folder containing `setup.exe`), or
+- **an existing installation** (the folder containing `Sims.exe`).
+
+If the installer stops with *"Insert next disk"* (`setup-2.bin` not found), type the path
+to the second disc folder in the dialog, using Wine's `Z:` drive, for example
+`Z:\Users\you\Games\sims\disc2`, and press OK.
+
+After that, just open **Sims on Mac.app** to play.
+
+> **Pink splash screen, then the game quits?** You are running unpatched Wine. This
+> happens when Wine Staging updates itself and replaces the patched libraries. Use the
+> app above, or re-run `install.command` with Wine 11.13.
+
 ## Why the game does not run
 
 The Sims 1 renders **only in 16-bit colour**. Its executable contains exactly three
@@ -119,6 +146,8 @@ format and the game will not start.
 src/          patched Wine sources
 dlls/         prebuilt libraries (Wine 11.13 only)
 build.sh      build and install from sources
+make-bundle.sh   assemble the self-contained app
+launcher.sh   the app's launcher script
 install.command  reinstall prebuilt libraries
 sims-wine-11.13.patch   the patch itself
 ```

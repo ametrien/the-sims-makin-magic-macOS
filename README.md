@@ -5,7 +5,6 @@ Wine patches that make **The Sims (2000) and its expansions** run on Apple Silic
 You bring your own copy of the game. This repository only contains patches to Wine and
 the tooling to apply them.
 
-*[Русская версия](README.ru.md)*
 
 ---
 

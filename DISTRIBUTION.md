@@ -1,75 +1,79 @@
-# Как сделать это доступным другим
+# Making this available to others
 
-Исходное условие: у человека есть **свои** диски с игрой. Мы раздаём только правки к Wine
-и способ их применить — никакого содержимого игры.
+Starting assumption: people have **their own** copy of the game. We only distribute the
+Wine changes and a way to apply them, never any game content.
 
-## Ограничение, определяющее всё остальное
+## The constraint that shapes everything else
 
-`wined3d.dll` и `ddraw.dll` — внутренние модули Wine. Интерфейс между ними **не
-стабилизирован между версиями**: собранная нами пара работает только с Wine 11.13 и
-ровно с той же сборкой. Поэтому «выложить две библиотеки» — нерабочий вариант, сломается
-у первого же человека с другой версией Wine.
+`wined3d.dll` and `ddraw.dll` are internal Wine modules. The interface between them is
+**not stable across versions**: the pair we built works only with Wine 11.13, and only
+with that exact build. So "just publish the two libraries" does not work. It breaks for
+the first person with a different Wine version.
 
-## Вариант A. Отправить правки в WineHQ
+## Option A. Send the fixes to WineHQ
 
-Самый долгоиграющий путь: попадёт в Wine — заработает у всех без всякой возни.
+The longest-lasting route: once the fixes are in Wine, the game works for everyone with
+no extra steps.
 
-Готово к отправке **как есть** (это настоящие баги, к Sims не привязаны):
+Ready to send **as is** (these are real bugs, not tied to The Sims):
 
-1. `ddraw_surface4/7_AddAttachedSurface` разыменовывает NULL, если приложение передало
-   пустой указатель. Должно возвращать `DDERR_INVALIDPARAMS`.
-2. Вулкановый бэкенд `wined3d` помечает первичный буфер локацией
-   `WINED3D_LOCATION_DRAWABLE`, которой в нём нет, и инвалидирует остальные — буфер
-   остаётся без единой годной локации.
+1. `ddraw_surface4/7_AddAttachedSurface` dereferences NULL when the application passes a
+   null pointer. It should return `DDERR_INVALIDPARAMS`.
+2. The Vulkan backend of `wined3d` marks the primary buffer with the
+   `WINED3D_LOCATION_DRAWABLE` location, which that backend does not have, and
+   invalidates all the others, leaving the buffer with no valid location at all.
 
-Требует доработки перед отправкой:
+Needs more work before sending:
 
-3. `GetSurfaceDesc` при некорректном `dwSize`. Нужны тесты на настоящем Windows: как
-   ведут себя интерфейсы v2/v3, действительно ли они снисходительны к размеру.
-4. Эмуляция 16-битного режима. Сейчас включается **всегда**, когда системе не удалось
-   поставить режим, — для апстрима так нельзя. Нужен явный признак: ключ реестра
-   `AppDefaults\<игра>.exe` или переменная окружения. Тема для обсуждения с
-   разработчиками Wine: у macOS 16-битных режимов нет вовсе, и это касается не одной
-   игры, а всего поколения.
+3. `GetSurfaceDesc` with an invalid `dwSize`. Needs tests on real Windows: how the v2/v3
+   interfaces behave, and whether they really tolerate a wrong size.
+4. 16-bit mode emulation. It currently switches on **whenever** the system fails to set
+   a mode, which is not acceptable upstream. It needs an explicit opt-in: a registry key
+   under `AppDefaults\<game>.exe` or an environment variable. Worth discussing with the
+   Wine developers: macOS has no 16-bit modes at all, and that affects a whole generation
+   of games, not just this one.
 
-Плюс: работает у всех и навсегда. Минус: месяцы, и по пункту 4 могут не согласиться.
+Pro: works for everyone, permanently. Con: takes months, and point 4 may be rejected.
 
-## Вариант B. Самодостаточное приложение (рекомендую для «сейчас»)
+## Option B. Self-contained app (done: `make-bundle.sh`)
 
-Собрать по образцу Wineskin/Kegworks: `.app`, внутри свой Wine 11.13 с нашими
-библиотеками и готовый префикс. Человек кладёт свои файлы игры и запускает двойным
-кликом. Проблема несовместимости версий исчезает — Wine внутри и никогда не обновляется
-сам.
+Built along the lines of Wineskin/Kegworks: an `.app` with its own Wine 11.13, our
+patched libraries and a ready prefix. The user points it at their game files and
+launches it with a double click. The version mismatch problem disappears, because the
+Wine inside never updates itself.
 
-Что нужно сделать:
-- бандл с Wine 11.13 + пропатченные модули;
-- первый запуск: мастер, который просит указать диск или папку с игрой и ставит её;
-- прописать ключи реестра (`AllowImmovableWindows=N`) и `WINE_D3D_CONFIG=renderer=gl`;
-- подписать бандл, иначе Gatekeeper на чужой машине не пустит.
+What it involves:
+- a bundle with Wine 11.13 and the patched modules;
+- a first-run wizard that asks for the game disc or folder and installs it;
+- setting `WINE_D3D_CONFIG=renderer=gl` (do **not** set `AllowImmovableWindows=N`, it
+  crashes the game, see the README);
+- signing the bundle, otherwise Gatekeeper blocks it on other machines.
 
-Плюс: работает у любого без терминала. Минус: ~1.5 ГБ на скачивание, и обновлять Wine
-внутри придётся руками.
+Pro: works for anyone, no Terminal needed. Con: about 1.5 GB to download, and the Wine
+inside has to be updated by hand.
 
-## Вариант C. Скрипт сборки
+## Option C. Build script (done: `build.sh`)
 
-Репозиторий + `build.sh`: скачивает исходники Wine 11.13, накладывает
-`sims-wine-11.13.patch`, собирает два модуля, ставит их и прописывает реестр.
+The repository plus `build.sh`: downloads the Wine 11.13 sources, applies
+`sims-wine-11.13.patch`, builds the two modules and installs them.
 
-Нужно: Xcode Command Line Tools, mingw-w64, bison из Homebrew. Сборка — минуты, не часы,
-потому что собираются только два PE-модуля, а не весь Wine.
+Needs: Xcode Command Line Tools, plus mingw-w64 and bison from Homebrew. The build takes
+minutes, not hours, because only two PE modules are built, not the whole of Wine.
 
-Плюс: честно, прозрачно, легко обновлять под новые версии Wine. Минус: человек должен
-уметь в терминал, и правки надо будет переносить на каждую новую версию Wine.
+Pro: honest, transparent, easy to update for new Wine versions. Con: the user needs to be
+comfortable with Terminal, and the patches have to be ported to each new Wine version.
 
-## Что стоит сделать в любом случае
+## Worth doing either way
 
-- **Проверить на чужой машине.** Всё найденное держится на одной конфигурации:
-  M3 Pro, macOS 26, Wine Staging 11.13. Как оно поведёт себя на Intel-маке или на
-  другой версии macOS — неизвестно.
-- **Проверить на нерусском издании игры.** Наш экземпляр — русский репак. Скорее всего
-  разницы нет (проблема в глубине цвета, а не в переводе), но это предположение.
-- **Описать причину простыми словами** — почему игра вообще не запускалась. Это главная
-  ценность для тех, кто будет искать решение: сама причина неочевидна и в интернете её
-  нет.
-- **Сузить эмуляцию режима до конкретного приложения**, а не включать её глобально по
-  факту отказа системы. Это нужно и для апстрима, и для безопасности чужих префиксов.
+- **Test on someone else's machine.** Everything found so far rests on one setup:
+  M3 Pro, macOS 26, Wine Staging 11.13. How it behaves on an Intel Mac or another macOS
+  version is unknown.
+- **Test with a non-Russian edition of the game.** Our copy is a Russian repack. There is
+  most likely no difference (the problem is colour depth, not the translation), but that
+  is an assumption.
+- **Explain the cause in plain words:** why the game did not start at all. That is the
+  most valuable part for anyone searching for a fix, since the cause is not obvious and
+  is not documented anywhere online.
+- **Limit the mode emulation to specific applications** instead of switching it on
+  globally whenever the system refuses a mode. This is needed both for upstream and to
+  keep other people's prefixes safe.

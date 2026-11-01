@@ -179,3 +179,13 @@ launch it creates its own prefix and asks for the folder containing your install
 existing installation.
 
 Roughly 1.5 GB. Sign it before handing it to anyone, otherwise Gatekeeper blocks it.
+
+## Licence
+
+The patched sources under `src/` and the built `dlls/*.dll` are modified parts of
+[Wine](https://www.winehq.org/), distributed under the **GNU LGPL v2.1 or later**
+(see [`COPYING.LIB`](COPYING.LIB)). The changes are listed in
+[`sims-wine-11.13.patch`](sims-wine-11.13.patch), against Wine 11.13 Staging.
+Scripts and documentation in this repository are released under the same terms.
+
+No part of The Sims is included here — bring your own copy of the game.
